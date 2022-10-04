@@ -23,8 +23,7 @@
 // THE SOFTWARE.
 //
 
-use crc::crc32;
-use crc::Hasher32;
+use crc::*;
 
 use std::io;
 use std::io::Write;
@@ -44,9 +43,7 @@ impl<W: Write> Writer<W> {
     // give it back to you via Writer::close().
     //
     pub fn new(output: W) -> Writer<W> {
-        Writer {
-            output,
-        }
+        Writer { output }
     }
 
     //
@@ -74,7 +71,7 @@ impl<W: Write> Writer<W> {
             13u8,  // \r
             10u8,  // \n
             26u8,  // SUB
-            10u8   // \n
+            10u8,  // \n
         ];
         self.write_bytes(&bytes)
     }
@@ -102,10 +99,12 @@ impl<W: Write> Writer<W> {
         }
 
         // CRC covers both tag and data.
-        let mut digest = crc32::Digest::new(crc32::IEEE);
-        digest.write(tag);
-        digest.write(data);
-        let checksum = digest.sum32();
+        // let mut digest = crc32::Digest::new(crc32::IEEE);
+        let crc = Crc::<u32>::new(&CRC_32_ISO_HDLC);
+        let mut digest = crc.digest();
+        digest.update(tag);
+        digest.update(data);
+        let checksum = digest.finalize();
 
         // Write data...
         self.write_be32(data.len() as u32)?;
@@ -131,6 +130,25 @@ impl<W: Write> Writer<W> {
         self.write_chunk(b"IHDR", &data)
     }
 
+    pub fn write_srgb(&mut self) -> IoResult {
+        self.write_chunk(b"sRGB", &[0])?;
+
+        let mut data = Vec::<u8>::new();
+        write_be32(&mut data, 45455)?;
+        self.write_chunk(b"gAMA", &data)?;
+
+        let mut data = Vec::<u8>::new();
+        write_be32(&mut data, 31270)?;
+        write_be32(&mut data, 32900)?;
+        write_be32(&mut data, 64000)?;
+        write_be32(&mut data, 33000)?;
+        write_be32(&mut data, 30000)?;
+        write_be32(&mut data, 60000)?;
+        write_be32(&mut data, 15000)?;
+        write_be32(&mut data, 6000)?;
+        self.write_chunk(b"cHRM", &data)
+    }
+
     //
     // IEND - last chunk in the file.
     // https://www.w3.org/TR/PNG/#11IEND
@@ -151,12 +169,13 @@ impl<W: Write> Writer<W> {
 mod tests {
     use std::io;
 
-    use super::Writer;
     use super::IoResult;
+    use super::Writer;
 
     fn test_writer<F, G>(test_func: F, assert_func: G)
-        where F: Fn(&mut Writer<Vec<u8>>) -> IoResult,
-              G: Fn(&[u8])
+    where
+        F: Fn(&mut Writer<Vec<u8>>) -> IoResult,
+        G: Fn(&[u8]),
     {
         let result = (|| -> io::Result<Vec<u8>> {
             let output = Vec::<u8>::new();
@@ -166,64 +185,69 @@ mod tests {
         })();
         match result {
             Ok(output) => assert_func(&output),
-            Err(e) => assert!(false, "Error: {}", e),
+            Err(e) => panic!("Error: {}", e),
         }
     }
 
     #[test]
     fn it_works() {
-        test_writer(|_writer| {
-            Ok(())
-        }, |output| {
-            assert_eq!(output.len(), 0);
-        })
+        test_writer(
+            |_writer| Ok(()),
+            |output| {
+                assert_eq!(output.len(), 0);
+            },
+        )
     }
 
     #[test]
     fn header_works() {
-        test_writer(|writer| {
-            writer.write_signature()
-        }, |output| {
-            assert_eq!(output.len(), 8);
-        })
+        test_writer(
+            |writer| writer.write_signature(),
+            |output| {
+                assert_eq!(output.len(), 8);
+            },
+        )
     }
 
     #[test]
     fn empty_chunk_works() {
-        test_writer(|writer| {
-            writer.write_chunk(b"IDAT", b"")
-        }, |output| {
-            // 4 bytes len
-            // 4 bytes tag
-            // 4 bytes crc
-            assert_eq!(output.len(), 12);
-        })
+        test_writer(
+            |writer| writer.write_chunk(b"IDAT", b""),
+            |output| {
+                // 4 bytes len
+                // 4 bytes tag
+                // 4 bytes crc
+                assert_eq!(output.len(), 12);
+            },
+        )
     }
 
     #[test]
     fn full_chunk_works() {
-        test_writer(|writer| {
-            writer.write_chunk(b"IDAT", b"01234567890123456789")
-        }, |output| {
-            // 4 bytes len
-            // 4 bytes tag
-            // 20 bytes data
-            // 4 bytes crc
-            assert_eq!(output.len(), 32);
-        })
+        test_writer(
+            |writer| writer.write_chunk(b"IDAT", b"01234567890123456789"),
+            |output| {
+                // 4 bytes len
+                // 4 bytes tag
+                // 20 bytes data
+                // 4 bytes crc
+                assert_eq!(output.len(), 32);
+            },
+        )
     }
 
     #[test]
     fn crc_works() {
         // From a 1x1 truecolor black pixel made with gd
         let one_pixel = b"\x08\x99\x63\x60\x60\x60\x00\x00\x00\x04\x00\x01";
-        test_writer(|writer| {
-            writer.write_chunk(b"IDAT", one_pixel)
-        }, |output| {
-            assert_eq!(output[0..4], b"\x00\x00\x00\x0c"[..], "expected length 12");
-            assert_eq!(output[4..8], b"IDAT"[..], "expected IDAT");
-            assert_eq!(output[8..20], one_pixel[..], "expected data payload");
-            assert_eq!(output[20..24], b"\xa3\x0a\x15\xe3"[..], "expected crc32");
-        })
+        test_writer(
+            |writer| writer.write_chunk(b"IDAT", one_pixel),
+            |output| {
+                assert_eq!(output[0..4], b"\x00\x00\x00\x0c"[..], "expected length 12");
+                assert_eq!(output[4..8], b"IDAT"[..], "expected IDAT");
+                assert_eq!(output[8..20], one_pixel[..], "expected data payload");
+                assert_eq!(output[20..24], b"\xa3\x0a\x15\xe3"[..], "expected crc32");
+            },
+        )
     }
 }

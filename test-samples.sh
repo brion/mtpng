@@ -6,6 +6,6 @@ mkdir -p out && \
 cd samples && \
 for x in *.png
 do
-  cargo --quiet run --release --features=cli -- "$@" "$x" "../out/$x" || exit 1
+  cargo --quiet run --release --example mtpng -- "$@" "$x" "../out/$x" || exit 1
   echo ""
 done

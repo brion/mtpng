@@ -28,33 +28,13 @@ use std::io::Write;
 
 use std::mem;
 
-use std::ptr;
-
 use std::convert::TryFrom;
 
 use std::os::raw::*;
 
-use ::libz_sys::*;
+use libz_sys::*;
 
 use super::utils::*;
-
-pub fn adler32(sum: u32, bytes: &[u8]) -> u32 {
-    unsafe {
-        ::libz_sys::adler32(c_ulong::from(sum), &bytes[0], bytes.len() as c_uint) as u32
-    }
-}
-
-pub fn adler32_initial() -> u32 {
-    unsafe {
-        ::libz_sys::adler32(0, ptr::null(), 0) as u32
-    }
-}
-
-pub fn adler32_combine(sum_a: u32, sum_b: u32, len_b: usize) -> u32 {
-    unsafe {
-        ::libz_sys::adler32_combine(c_ulong::from(sum_a), c_ulong::from(sum_b), len_b as c_long) as u32
-    }
-}
 
 pub struct Options {
     level: c_int,
@@ -158,20 +138,22 @@ impl<W: Write> Deflate<W> {
             Ok(())
         } else {
             let ret = unsafe {
-                deflateInit2_(&mut *self.stream,
-                              self.options.level,
-                              self.options.method,
-                              self.options.window_bits,
-                              self.options.mem_level,
-                              self.options.strategy,
-                              zlibVersion(),
-                              mem::size_of::<z_stream>() as c_int)
+                deflateInit2_(
+                    &mut *self.stream,
+                    self.options.level,
+                    self.options.method,
+                    self.options.window_bits,
+                    self.options.mem_level,
+                    self.options.strategy,
+                    zlibVersion(),
+                    mem::size_of::<z_stream>() as c_int,
+                )
             };
             match ret {
                 Z_OK => {
                     self.initialized = true;
                     Ok(())
-                },
+                }
                 Z_MEM_ERROR => Err(other("Out of memory")),
                 Z_STREAM_ERROR => Err(invalid_input("Invalid parameter")),
                 Z_VERSION_ERROR => Err(invalid_input("Incompatible version of zlib")),
@@ -182,11 +164,8 @@ impl<W: Write> Deflate<W> {
 
     pub fn set_dictionary(&mut self, dict: &[u8]) -> IoResult {
         self.init()?;
-        let ret = unsafe {
-            deflateSetDictionary(&mut *self.stream,
-                                 &dict[0],
-                                 dict.len() as c_uint)
-        };
+        let ret =
+            unsafe { deflateSetDictionary(&mut *self.stream, &dict[0], dict.len() as c_uint) };
         match ret {
             Z_OK => Ok(()),
             Z_STREAM_ERROR => Err(invalid_input("Invalid parameter")),
@@ -203,13 +182,11 @@ impl<W: Write> Deflate<W> {
         loop {
             stream.next_out = &mut buffer[0] as *mut u8;
             stream.avail_out = buffer.len() as c_uint;
-            let ret = unsafe {
-                deflate(stream, flush as c_int)
-            };
+            let ret = unsafe { deflate(stream, flush as c_int) };
             match ret {
                 Z_OK | Z_STREAM_END => {
                     let end = buffer.len() - stream.avail_out as usize;
-                    self.output.write_all(&buffer[0 .. end])?;
+                    self.output.write_all(&buffer[0..end])?;
                     match ret {
                         Z_OK => {
                             if stream.avail_out == 0 {
@@ -218,7 +195,7 @@ impl<W: Write> Deflate<W> {
                             } else {
                                 return Ok(());
                             }
-                        },
+                        }
                         Z_STREAM_END => {
                             self.finished = true;
                             if stream.avail_out == 0 {
@@ -227,10 +204,10 @@ impl<W: Write> Deflate<W> {
                             } else {
                                 return Ok(());
                             }
-                        },
+                        }
                         _ => unreachable!(),
                     }
-                },
+                }
                 Z_STREAM_ERROR => return Err(invalid_input("Inconsistent stream state")),
                 Z_BUF_ERROR => return Err(other("No progress possible")),
                 _ => return Err(other("Unexpected error")),
@@ -248,9 +225,7 @@ impl<W: Write> Deflate<W> {
     //
     pub fn finish(mut self) -> io::Result<W> {
         if self.initialized {
-            let ret = unsafe {
-                deflateEnd(&mut *self.stream)
-            };
+            let ret = unsafe { deflateEnd(&mut *self.stream) };
             match ret {
                 // Z_DATA_ERROR means we freed before finishing the stream.
                 // For our use case we do this deliberately, it's ok!

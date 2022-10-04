@@ -29,29 +29,23 @@ use std::io;
 use std::io::{Error, ErrorKind, Write};
 
 // CLI options
-extern crate clap;
-use clap::{Arg, ArgMatches, Command};
+use clap::{App, Arg, ArgMatches};
 
 // For reading an existing file
-extern crate png;
-
-extern crate rayon;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 // For timing!
-extern crate time;
 use time::OffsetDateTime;
 
 // Hey that's us!
 extern crate mtpng;
-use mtpng::{ColorType, CompressionLevel, Header};
-use mtpng::Mode::{Adaptive, Fixed};
 use mtpng::encoder::{Encoder, Options};
-use mtpng::Strategy;
 use mtpng::Filter;
+use mtpng::Mode::{Adaptive, Fixed};
+use mtpng::Strategy;
+use mtpng::{ColorType, CompressionLevel, Header};
 
-pub fn err(payload: &str) -> Error
-{
+pub fn err(payload: &str) -> Error {
     Error::new(ErrorKind::Other, payload)
 }
 
@@ -79,24 +73,26 @@ fn read_png(filename: &str)
     decoder.set_transformations(Transformations::IDENTITY);
 
     let mut reader = decoder.read_info()?;
-    let info = reader.info();
+    let mut data = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut data)?;
 
     let mut header = Header::new();
     header.set_size(info.width, info.height)?;
-    header.set_color(ColorType::try_from(info.color_type as u8)?,
-                     info.bit_depth as u8)?;
+    header.set_color(
+        ColorType::try_from(info.color_type as u8)?,
+        info.bit_depth as u8,
+    )?;
 
-    let palette = match info.palette {
-        Some(ref cow) => Some(expand(&cow[..])?),
-        None => None,
-    };
-    let transparency = match info.trns {
-        Some(ref cow) => Some(expand(&cow[..])?),
-        None => None,
-    };
-
-    let mut data = vec![0u8; reader.output_buffer_size()];
-    reader.next_frame(&mut data)?;
+    let info = reader.info();
+    // Very ugly hack to run from the Cow and ownership
+    let palette = info
+        .palette
+        .clone()
+        .map(|x| x.iter().cloned().collect::<Vec<u8>>());
+    let transparency = info
+        .trns
+        .clone()
+        .map(|x| x.iter().cloned().collect::<Vec<u8>>());
 
     Ok(Image {
         header,
@@ -119,48 +115,48 @@ fn write_png(pool: &ThreadPool,
     options.set_thread_pool(pool)?;
 
     match args.value_of("chunk-size") {
-        None    => {},
+        None => {}
         Some(s) => {
             let n = s.parse::<usize>().map_err(|_e| err("Invalid chunk size"))?;
             options.set_chunk_size(n)?;
-        },
+        }
     }
 
     match args.value_of("filter") {
-        None             => {},
+        None => {}
         Some("adaptive") => options.set_filter_mode(Adaptive)?,
-        Some("none")     => options.set_filter_mode(Fixed(Filter::None))?,
-        Some("up")       => options.set_filter_mode(Fixed(Filter::Up))?,
-        Some("sub")      => options.set_filter_mode(Fixed(Filter::Sub))?,
-        Some("average")  => options.set_filter_mode(Fixed(Filter::Average))?,
-        Some("paeth")    => options.set_filter_mode(Fixed(Filter::Paeth))?,
-        _                => return Err(err("Unsupported filter type")),
+        Some("none") => options.set_filter_mode(Fixed(Filter::None))?,
+        Some("up") => options.set_filter_mode(Fixed(Filter::Up))?,
+        Some("sub") => options.set_filter_mode(Fixed(Filter::Sub))?,
+        Some("average") => options.set_filter_mode(Fixed(Filter::Average))?,
+        Some("paeth") => options.set_filter_mode(Fixed(Filter::Paeth))?,
+        _ => return Err(err("Unsupported filter type")),
     }
 
     match args.value_of("level") {
-        None            => {},
+        None => {}
         Some("default") => options.set_compression_level(CompressionLevel::Default)?,
-        Some("1")       => options.set_compression_level(CompressionLevel::Fast)?,
-        Some("9")       => options.set_compression_level(CompressionLevel::High)?,
-        _               => return Err(err("Unsupported compression level (try default, 1, or 9)")),
+        Some("1") => options.set_compression_level(CompressionLevel::Fast)?,
+        Some("9") => options.set_compression_level(CompressionLevel::High)?,
+        _ => return Err(err("Unsupported compression level (try default, 1, or 9)")),
     }
 
     match args.value_of("strategy") {
-        None             => {},
-        Some("auto")     => options.set_strategy_mode(Adaptive)?,
-        Some("default")  => options.set_strategy_mode(Fixed(Strategy::Default))?,
+        None => {}
+        Some("auto") => options.set_strategy_mode(Adaptive)?,
+        Some("default") => options.set_strategy_mode(Fixed(Strategy::Default))?,
         Some("filtered") => options.set_strategy_mode(Fixed(Strategy::Filtered))?,
-        Some("huffman")  => options.set_strategy_mode(Fixed(Strategy::HuffmanOnly))?,
-        Some("rle")      => options.set_strategy_mode(Fixed(Strategy::Rle))?,
-        Some("fixed")    => options.set_strategy_mode(Fixed(Strategy::Fixed))?,
-        _                => return Err(err("Invalid compression strategy mode"))?,
+        Some("huffman") => options.set_strategy_mode(Fixed(Strategy::HuffmanOnly))?,
+        Some("rle") => options.set_strategy_mode(Fixed(Strategy::RLE))?,
+        Some("fixed") => options.set_strategy_mode(Fixed(Strategy::Fixed))?,
+        _ => return Err(err("Invalid compression strategy mode")),
     }
 
     match args.value_of("streaming") {
-        None        => {},
+        None => {}
         Some("yes") => options.set_streaming(true)?,
-        Some("no")  => options.set_streaming(false)?,
-        _           => return Err(err("Invalid streaming mode, try yes or no."))
+        Some("no") => options.set_streaming(false)?,
+        _ => return Err(err("Invalid streaming mode, try yes or no.")),
     }
 
     let mut encoder = Encoder::new(writer, &options);
@@ -183,21 +179,18 @@ fn write_png(pool: &ThreadPool,
 
 fn doit(args: ArgMatches) -> io::Result<()> {
     let threads = match args.value_of("threads") {
-        None    => 0, // Means default
-        Some(s) => {
-            s.parse::<usize>().map_err(|_e| err("invalid threads"))?
-        },
+        None => 0, // Means default
+        Some(s) => s.parse::<usize>().map_err(|_e| err("invalid threads"))?,
     };
 
-    let pool = ThreadPoolBuilder::new().num_threads(threads)
-                                       .build()
-                                       .map_err(|e| err(&e.to_string()))?;
+    let pool = ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|e| err(&e.to_string()))?;
     eprintln!("Using {} threads", pool.current_num_threads());
 
     let reps = match args.value_of("repeat") {
-        Some(s) => {
-            s.parse::<usize>().map_err(|_e| err("invalid repeat"))?
-        },
+        Some(s) => s.parse::<usize>().map_err(|_e| err("invalid repeat"))?,
         None => 1,
     };
 
@@ -208,7 +201,7 @@ fn doit(args: ArgMatches) -> io::Result<()> {
     println!("{} -> {}", infile, outfile);
     let image = read_png(infile)?;
 
-    for _i in 0 .. reps {
+    for _i in 0..reps {
         let start_time = OffsetDateTime::now_utc();
         write_png(&pool, &args, outfile, &image)?;
         let delta = OffsetDateTime::now_utc() - start_time;
@@ -220,7 +213,7 @@ fn doit(args: ArgMatches) -> io::Result<()> {
 }
 
 pub fn main() {
-    let matches = Command::new("mtpng parallel PNG encoder")
+    let matches = clap::Command::new("mtpng parallel PNG encoder")
         .version("0.4.0")
         .author("Brion Vibber <brion@pobox.com>")
         .about("Re-encodes PNG images using multiple CPU cores to exercise the mtpng library.")
@@ -264,7 +257,7 @@ pub fn main() {
         .get_matches();
 
     match doit(matches) {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(e) => eprintln!("Error: {}", e),
     }
 }

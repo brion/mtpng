@@ -27,6 +27,10 @@ use std::cmp;
 use std::convert::TryFrom;
 use std::io;
 
+use itertools::izip;
+use typenum::consts::*;
+use typenum::Unsigned;
+
 use super::Header;
 use super::Mode;
 use super::Mode::{Adaptive, Fixed};
@@ -59,6 +63,25 @@ impl TryFrom<u8> for Filter {
 }
 
 //
+// Using runtime bpp variable in the inner loop slows things down;
+// specialize the filter functions for each possible constant size.
+//
+fn filter_iter_specialized<F>(bpp: usize, prev: &[u8], src: &[u8], out: &mut [u8], func: F)
+where
+    F: Fn(u8, u8, u8, u8) -> u8,
+{
+    match bpp {
+        1 => filter_iter_generic::<F, U1>(prev, src, out, func), // indexed, greyscale@8
+        2 => filter_iter_generic::<F, U2>(prev, src, out, func), // greyscale@16, greyscale+alpha@8
+        3 => filter_iter_generic::<F, U3>(prev, src, out, func), // truecolor@8
+        4 => filter_iter_generic::<F, U4>(prev, src, out, func), // truecolor@8, greyscale+alpha@16
+        6 => filter_iter_generic::<F, U6>(prev, src, out, func), // truecolor@16
+        8 => filter_iter_generic::<F, U8>(prev, src, out, func), // truecolor+alpha@16
+        _ => (),
+    }
+}
+
+//
 // Iterator helper for the filter functions.
 //
 // Filters are all byte-wise, and accept four input pixels:
@@ -69,8 +92,9 @@ impl TryFrom<u8> for Filter {
 // so far plus the offset.
 //
 #[inline(always)]
-fn filter_iter<F>(bpp: usize, prev: &[u8], src: &[u8], out: &mut [u8], func: F)
-    where F : Fn(u8, u8, u8, u8) -> u8
+fn filter_iter_generic<F, BPP: Unsigned>(prev: &[u8], src: &[u8], out: &mut [u8], func: F)
+where
+    F: Fn(u8, u8, u8, u8) -> u8,
 {
     //
     // The izip! macro merges multiple iterators together.
@@ -79,20 +103,22 @@ fn filter_iter<F>(bpp: usize, prev: &[u8], src: &[u8], out: &mut [u8], func: F)
     // optimization, and doesn't require the voodoo assertions.
     //
 
-    for (dest, cur, up) in
-        izip!(&mut out[0 .. bpp],
-              &src[0 .. bpp],
-              &prev[0 .. bpp]) {
+    for (dest, cur, up) in izip!(
+        &mut out[0..BPP::USIZE],
+        &src[0..BPP::USIZE],
+        &prev[0..BPP::USIZE]
+    ) {
         *dest = func(*cur, 0, *up, 0);
     }
 
     let len = out.len();
-    for (dest, cur, left, up, above_left) in
-        izip!(&mut out[bpp .. len],
-              &src[bpp .. len],
-              &src[0 .. len - bpp],
-              &prev[bpp .. len],
-              &prev[0 .. len - bpp]) {
+    for (dest, cur, left, up, above_left) in izip!(
+        &mut out[BPP::USIZE..len],
+        &src[BPP::USIZE..len],
+        &src[0..len - BPP::USIZE],
+        &prev[BPP::USIZE..len],
+        &prev[0..len - BPP::USIZE]
+    ) {
         *dest = func(*cur, *left, *up, *above_left);
     }
 }
@@ -106,7 +132,7 @@ fn filter_iter<F>(bpp: usize, prev: &[u8], src: &[u8], out: &mut [u8], func: F)
 fn filter_none(_bpp: usize, _prev: &[u8], src: &[u8], dest: &mut [u8]) {
     // Does not need specialization.
     dest[0] = Filter::None as u8;
-    dest[1 ..].clone_from_slice(src);
+    dest[1..].clone_from_slice(src);
 }
 
 //
@@ -118,9 +144,13 @@ fn filter_none(_bpp: usize, _prev: &[u8], src: &[u8], dest: &mut [u8]) {
 fn filter_sub(bpp: usize, prev: &[u8], src: &[u8], dest: &mut [u8]) {
     dest[0] = Filter::Sub as u8;
 
-    filter_iter(bpp, prev, src, &mut dest[1 ..], |val, left, _above, _upper_left| -> u8 {
-        val.wrapping_sub(left)
-    })
+    filter_iter_specialized(
+        bpp,
+        prev,
+        src,
+        &mut dest[1..],
+        |val, left, _above, _upper_left| -> u8 { val.wrapping_sub(left) },
+    )
 }
 
 //
@@ -134,9 +164,13 @@ fn filter_up(bpp: usize, prev: &[u8], src: &[u8], dest: &mut [u8]) {
     // Does not need specialization.
     dest[0] = Filter::Up as u8;
 
-    filter_iter(bpp, prev, src, &mut dest[1 ..], |val, _left, above, _upper_left| -> u8 {
-        val.wrapping_sub(above)
-    })
+    filter_iter_specialized(
+        bpp,
+        prev,
+        src,
+        &mut dest[1..],
+        |val, _left, above, _upper_left| -> u8 { val.wrapping_sub(above) },
+    )
 }
 
 //
@@ -148,10 +182,16 @@ fn filter_up(bpp: usize, prev: &[u8], src: &[u8], dest: &mut [u8]) {
 fn filter_average(bpp: usize, prev: &[u8], src: &[u8], dest: &mut [u8]) {
     dest[0] = Filter::Average as u8;
 
-    filter_iter(bpp, prev, src, &mut dest[1 ..], |val, left, above, _upper_left| -> u8 {
-        let avg = ((i16::from(left) + i16::from(above)) / 2) as u8;
-        val.wrapping_sub(avg)
-    })
+    filter_iter_specialized(
+        bpp,
+        prev,
+        src,
+        &mut dest[1..],
+        |val, left, above, _upper_left| -> u8 {
+            let avg = ((i16::from(left) + i16::from(above)) / 2) as u8;
+            val.wrapping_sub(avg)
+        },
+    )
 }
 
 //
@@ -165,7 +205,7 @@ fn paeth_predictor(left: u8, above: u8, upper_left: u8) -> u8 {
     let b = i16::from(above);
     let c = i16::from(upper_left);
 
-    let p = a + b - c;        // initial estimate
+    let p = a + b - c; // initial estimate
     let pa = i16::abs(p - a); // distances to a, b, c
     let pb = i16::abs(p - b);
     let pc = i16::abs(p - c);
@@ -193,11 +233,16 @@ fn paeth_predictor(left: u8, above: u8, upper_left: u8) -> u8 {
 fn filter_paeth(bpp: usize, prev: &[u8], src: &[u8], dest: &mut [u8]) {
     dest[0] = Filter::Paeth as u8;
 
-    filter_iter(bpp, prev, src, &mut dest[1 ..], |val, left, above, upper_left| -> u8 {
-        val.wrapping_sub(paeth_predictor(left, above, upper_left))
-    })
+    filter_iter_specialized(
+        bpp,
+        prev,
+        src,
+        &mut dest[1..],
+        |val, left, above, upper_left| -> u8 {
+            val.wrapping_sub(paeth_predictor(left, above, upper_left))
+        },
+    )
 }
-
 
 //
 // For the complexity/compressibility heuristic. Absolute value
@@ -287,80 +332,17 @@ impl Filterator {
     #[inline(always)]
     fn do_filter(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
         match self.filter {
-            Filter::None    => filter_none(self.bpp, prev, src, &mut self.data),
-            Filter::Sub     => filter_sub(self.bpp, prev, src, &mut self.data),
-            Filter::Up      => filter_up(self.bpp, prev, src, &mut self.data),
+            Filter::None => filter_none(self.bpp, prev, src, &mut self.data),
+            Filter::Sub => filter_sub(self.bpp, prev, src, &mut self.data),
+            Filter::Up => filter_up(self.bpp, prev, src, &mut self.data),
             Filter::Average => filter_average(self.bpp, prev, src, &mut self.data),
-            Filter::Paeth   => filter_paeth(self.bpp, prev, src, &mut self.data),
+            Filter::Paeth => filter_paeth(self.bpp, prev, src, &mut self.data),
         }
         self.complexity = estimate_complexity(&self.data[1..]);
         &self.data
     }
 
-    #[cfg(target_arch = "x86")]
-    #[target_feature(enable = "sse2")]
-    unsafe fn do_filter_sse2(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        self.do_filter(prev, src)
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "sse4.1")]
-    unsafe fn do_filter_sse41(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        self.do_filter(prev, src)
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "sse4.2")]
-    unsafe fn do_filter_sse42(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        self.do_filter(prev, src)
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "avx")]
-    unsafe fn do_filter_avx(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        self.do_filter(prev, src)
-    }
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[target_feature(enable = "avx2")]
-    unsafe fn do_filter_avx2(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        self.do_filter(prev, src)
-    }
-
     fn filter(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            if is_x86_feature_detected!("avx2") {
-                return unsafe {
-                    self.do_filter_avx2(prev, src)
-                };
-            }
-            if is_x86_feature_detected!("avx") {
-                return unsafe {
-                    self.do_filter_avx(prev, src)
-                };
-            }
-            if is_x86_feature_detected!("sse4.2") {
-                return unsafe {
-                    self.do_filter_sse42(prev, src)
-                };
-            }
-            if is_x86_feature_detected!("sse4.1") {
-                return unsafe {
-                    self.do_filter_sse41(prev, src)
-                };
-            }
-        }
-        #[cfg(target_arch = "x86")]
-        {
-            // SSE2 is guaranteed on x86_64
-            // but may not be present on x86
-            if is_x86_feature_detected!("sse2") {
-                return unsafe {
-                    self.do_filter_sse2(prev, src)
-                };
-            }
-        }
         self.do_filter(prev, src)
     }
 
@@ -388,11 +370,11 @@ impl AdaptiveFilter {
         let bpp = header.bytes_per_pixel();
         AdaptiveFilter {
             mode,
-            filter_none:    Filterator::new(Filter::None,    bpp, stride),
-            filter_up:      Filterator::new(Filter::Up,      bpp, stride),
-            filter_sub:     Filterator::new(Filter::Sub,     bpp, stride),
+            filter_none: Filterator::new(Filter::None, bpp, stride),
+            filter_up: Filterator::new(Filter::Up, bpp, stride),
+            filter_sub: Filterator::new(Filter::Sub, bpp, stride),
             filter_average: Filterator::new(Filter::Average, bpp, stride),
-            filter_paeth:   Filterator::new(Filter::Paeth,   bpp, stride),
+            filter_paeth: Filterator::new(Filter::Paeth, bpp, stride),
         }
     }
 
@@ -422,35 +404,35 @@ impl AdaptiveFilter {
         self.filter_paeth.filter(prev, src);
         min = cmp::min(min, self.filter_paeth.get_complexity());
 
-        if min == self.filter_sub.get_complexity()  {
+        if min == self.filter_sub.get_complexity() {
             self.filter_sub.get_data()
         } else if min == self.filter_up.get_complexity() {
             self.filter_up.get_data()
         } else if min == self.filter_average.get_complexity() {
             self.filter_average.get_data()
-        } else /* if min == self.filter_paeth.get_complexity() */ {
+        } else {
             self.filter_paeth.get_data()
         }
     }
 
     pub fn filter(&mut self, prev: &[u8], src: &[u8]) -> &[u8] {
         match self.mode {
-            Fixed(Filter::None)    => self.filter_none.filter(prev, src),
-            Fixed(Filter::Sub)     => self.filter_sub.filter(prev, src),
-            Fixed(Filter::Up)      => self.filter_up.filter(prev, src),
+            Fixed(Filter::None) => self.filter_none.filter(prev, src),
+            Fixed(Filter::Sub) => self.filter_sub.filter(prev, src),
+            Fixed(Filter::Up) => self.filter_up.filter(prev, src),
             Fixed(Filter::Average) => self.filter_average.filter(prev, src),
-            Fixed(Filter::Paeth)   => self.filter_paeth.filter(prev, src),
-            Adaptive               => self.filter_adaptive(prev, src),
+            Fixed(Filter::Paeth) => self.filter_paeth.filter(prev, src),
+            Adaptive => self.filter_adaptive(prev, src),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::ColorType;
+    use super::super::Header;
     use super::AdaptiveFilter;
     use super::Mode;
-    use super::super::Header;
-    use super::super::ColorType;
 
     #[test]
     fn it_works() {

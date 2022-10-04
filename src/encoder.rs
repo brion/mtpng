@@ -27,19 +27,21 @@ use rayon::ThreadPool;
 
 use std::collections::VecDeque;
 
-use std::io;
 use std::io::Write;
+use std::io::{self, ErrorKind};
 
-use std::sync::Arc;
 use std::sync::mpsc;
-use std::sync::mpsc::{Sender, Receiver};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
+
+use crate::adler32;
 
 use super::ColorType;
 use super::CompressionLevel;
-use super::Strategy;
 use super::Header;
 use super::Mode;
 use super::Mode::{Adaptive, Fixed};
+use super::Strategy;
 
 use super::filter::AdaptiveFilter;
 use super::filter::Filter;
@@ -50,7 +52,6 @@ use super::deflate::Deflate;
 use super::deflate::Flush;
 
 use super::utils::*;
-
 
 /// Options setup struct for the PNG encoder.
 /// May be modified and reused.
@@ -138,7 +139,7 @@ impl<'a> Options<'a> {
     /// Set the pixel filtering mode. By default it will use Adaptive,
     /// which tries all filter modes and a heuristic to guess which will
     /// compress better on a line-by-line basis.
-    /// 
+    ///
     /// The same logic and heuristic are used as in libpng,
     /// which often does well but can pick poorly on some images.
     /// Fixed<*> may be used to override the mode for the whole image,
@@ -215,21 +216,32 @@ impl PixelChunk {
         self.rows.len() == (self.end_row - self.start_row)
     }
 
-    fn read_row(&mut self, row: &[u8])
-    {
+    fn read_row(&mut self, row: &[u8]) {
         let mut row_copy = Vec::with_capacity(self.stride);
         row_copy.extend_from_slice(row);
 
         self.rows.push(row_copy);
     }
 
-    fn get_row(&self, row: usize) -> &[u8] {
+    fn get_row(&self, row: usize) -> Result<&[u8], std::io::Error> {
         if row < self.start_row {
-            panic!("Tried to access row from earlier chunk: {} < {}", row, self.start_row);
+            Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Tried to access row from earlier chunk: {} < {}",
+                    row, self.start_row
+                ),
+            ))
         } else if row >= self.end_row {
-            panic!("Tried to access row from later chunk: {} >= {}", row, self.end_row);
+            Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "Tried to access row from later chunk: {} >= {}",
+                    row, self.end_row
+                ),
+            ))
         } else {
-            &self.rows[row - self.start_row]
+            Ok(&self.rows[row - self.start_row])
         }
     }
 }
@@ -257,10 +269,11 @@ struct FilterChunk {
 }
 
 impl FilterChunk {
-    fn new(prior_input: Option<Arc<PixelChunk>>,
-           input: Arc<PixelChunk>,
-           filter_mode: Mode<Filter>) -> FilterChunk
-    {
+    fn new(
+        prior_input: Option<Arc<PixelChunk>>,
+        input: Arc<PixelChunk>,
+        filter_mode: Mode<Filter>,
+    ) -> FilterChunk {
         // Prepend one byte for the filter selector.
         let stride = input.stride + 1;
         let nbytes = stride * (input.end_row - input.start_row);
@@ -287,9 +300,9 @@ impl FilterChunk {
         let trailer = 32768;
         let len = self.data.len();
         if len > trailer {
-            &self.data[len - trailer .. len]
+            &self.data[len - trailer..len]
         } else {
-            &self.data[0 .. len]
+            &self.data[0..len]
         }
     }
 
@@ -299,7 +312,7 @@ impl FilterChunk {
     fn run(&mut self) -> IoResult {
         let mut filter = AdaptiveFilter::new(self.input.header, self.filter_mode);
         let zero = vec![0u8; self.stride - 1];
-        for i in self.start_row .. self.end_row {
+        for i in self.start_row..self.end_row {
             let prior = if i == self.start_row {
                 match self.prior_input {
                     Some(ref input) => input,
@@ -308,13 +321,9 @@ impl FilterChunk {
             } else {
                 &self.input
             };
-            let prev = if i == 0 {
-                &zero
-            } else {
-                prior.get_row(i - 1)
-            };
+            let prev = if i == 0 { &zero } else { prior.get_row(i - 1)? };
 
-            let row = self.input.get_row(i);
+            let row = self.input.get_row(i)?;
 
             let output = filter.filter(prev, row);
 
@@ -349,11 +358,12 @@ struct DeflateChunk {
 }
 
 impl DeflateChunk {
-    fn new(compression_level: CompressionLevel,
-           strategy: Strategy,
-           prior_input: Option<Arc<FilterChunk>>,
-           input: Arc<FilterChunk>) -> DeflateChunk {
-
+    fn new(
+        compression_level: CompressionLevel,
+        strategy: Strategy,
+        prior_input: Option<Arc<FilterChunk>>,
+        input: Arc<FilterChunk>,
+    ) -> DeflateChunk {
         DeflateChunk {
             index: input.index,
             is_start: input.is_start,
@@ -365,7 +375,7 @@ impl DeflateChunk {
             prior_input,
             input,
             data: Vec::new(),
-            adler32: deflate::adler32_initial(),
+            adler32: adler32::adler32_initial(),
         }
     }
 
@@ -386,7 +396,7 @@ impl DeflateChunk {
         });
 
         match self.compression_level {
-            CompressionLevel::Default => {},
+            CompressionLevel::Default => {}
             CompressionLevel::Fast => options.set_level(1),
             CompressionLevel::High => options.set_level(9),
         }
@@ -394,28 +404,30 @@ impl DeflateChunk {
 
         let mut encoder = Deflate::new(options, data);
 
-
         if let Some(ref filter) = self.prior_input {
             let trailer = filter.get_trailer();
             encoder.set_dictionary(trailer)?;
         }
 
-        encoder.write(&self.input.data, if self.is_end {
-            Flush::Finish
-        } else {
-            Flush::SyncFlush
-        })?;
+        encoder.write(
+            &self.input.data,
+            if self.is_end {
+                Flush::Finish
+            } else {
+                Flush::SyncFlush
+            },
+        )?;
 
         // In raw deflate mode we have to calculate the checksum ourselves.
-        self.adler32 = deflate::adler32(1, &self.input.data);
+        self.adler32 = adler32::adler32(1, &self.input.data);
 
         match encoder.finish() {
             Ok(data) => {
                 // This seems lame to move the vector back, but it's actually cheap.
                 self.data = data;
                 Ok(())
-            },
-            Err(e) => Err(e)
+            }
+            Err(e) => Err(e),
         }
     }
 }
@@ -468,12 +480,18 @@ impl<T> ChunkMap<T> {
     //
     // Record that this job has landed and save its data.
     //
-    fn land(&mut self, index: usize, chunk: Arc<T>) {
+    fn land(&mut self, index: usize, chunk: Arc<T>) -> IoResult {
         if index < self.cursor_out {
-            panic!("Tried to land an expired chunk");
+            return Err(std::io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Tried to land an expired chunk",
+            ));
         }
         if index > self.cursor_in {
-            panic!("Tried to land a future chunk");
+            return Err(std::io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Tried to land a future chunk",
+            ));
         }
         self.running -= 1;
         let offset = index - self.cursor_out;
@@ -485,6 +503,7 @@ impl<T> ChunkMap<T> {
         } else {
             self.chunks[offset] = Some(chunk);
         }
+        Ok(())
     }
 
     fn pop_front(&mut self) -> Option<(Option<Arc<T>>, Arc<T>)> {
@@ -496,16 +515,17 @@ impl<T> ChunkMap<T> {
                     Some(Some(item)) => {
                         let prev = std::mem::replace(&mut self.prev, Some(Arc::clone(&item)));
                         Some((prev, item))
-                    },
+                    }
                     _ => {
-                        panic!("Bad job queue state")
+                        println!("[mtpng] Bad job queue state");
+                        None
                     }
                 }
-            },
+            }
             Some(None) => {
                 // Not ready yet but a later chunk landed.
                 None
-            },
+            }
             None => {
                 // Nothing yet.
                 None
@@ -598,7 +618,7 @@ impl<'a, W: Write> Encoder<'a, W> {
             filter_chunks: ChunkMap::new(),
             deflate_chunks: ChunkMap::new(),
 
-            adler32: deflate::adler32_initial(),
+            adler32: adler32::adler32_initial(),
             idat_buffer: Vec::new(),
 
             tx,
@@ -625,7 +645,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     fn threads(&self) -> usize {
         match self.options.thread_pool {
             Some(pool) => pool.current_num_threads(),
-            None => ::rayon::current_num_threads()
+            None => ::rayon::current_num_threads(),
         }
     }
 
@@ -636,7 +656,8 @@ impl<'a, W: Write> Encoder<'a, W> {
     }
 
     fn dispatch_func<F>(&self, func: F)
-        where F: Fn(&Sender<ThreadMessage>) + Send + 'static
+    where
+        F: Fn(&Sender<ThreadMessage>) + Send + 'static,
     {
         let tx = self.tx.clone();
         match self.options.thread_pool {
@@ -644,9 +665,9 @@ impl<'a, W: Write> Encoder<'a, W> {
                 pool.spawn(move || {
                     func(&tx);
                 });
-            },
+            }
             None => {
-                ::rayon::spawn(move || {
+                rayon::spawn(move || {
                     func(&tx);
                 });
             }
@@ -670,7 +691,7 @@ impl<'a, W: Write> Encoder<'a, W> {
             DispatchMode::NonBlocking => match self.rx.try_recv() {
                 Ok(msg) => Some(msg),
                 _ => None,
-            }
+            },
         }
     }
 
@@ -679,8 +700,8 @@ impl<'a, W: Write> Encoder<'a, W> {
             Fixed(s) => Fixed(s),
             Adaptive => match self.header.color_type {
                 ColorType::IndexedColor => Fixed(Filter::None),
-                _                       => Adaptive,
-            }
+                _ => Adaptive,
+            },
         }
     }
 
@@ -689,7 +710,7 @@ impl<'a, W: Write> Encoder<'a, W> {
             Fixed(s) => s,
             Adaptive => match self.filter_mode() {
                 Fixed(Filter::None) => Strategy::Default,
-                _                   => Strategy::Filtered,
+                _ => Strategy::Filtered,
             },
         }
     }
@@ -700,11 +721,11 @@ impl<'a, W: Write> Encoder<'a, W> {
         while self.filter_chunks.in_flight() || self.deflate_chunks.in_flight() {
             match self.receive(blocking_mode) {
                 Some(ThreadMessage::FilterDone(filter)) => {
-                    self.filter_chunks.land(filter.index, filter);
+                    self.filter_chunks.land(filter.index, filter)?;
                 }
                 Some(ThreadMessage::DeflateDone(deflate)) => {
-                    self.deflate_chunks.land(deflate.index, deflate);
-                },
+                    self.deflate_chunks.land(deflate.index, deflate)?;
+                }
                 Some(ThreadMessage::Error(e)) => {
                     return Err(e);
                 }
@@ -727,13 +748,15 @@ impl<'a, W: Write> Encoder<'a, W> {
                     let strategy = self.compression_strategy();
                     self.deflate_chunks.advance();
                     self.dispatch_func(move |tx| {
-                        let mut deflate = DeflateChunk::new(level, strategy, previous.clone(), current.clone());
+                        let mut deflate =
+                            DeflateChunk::new(level, strategy, previous.clone(), current.clone());
                         tx.send(match deflate.run() {
                             Ok(()) => ThreadMessage::DeflateDone(Arc::new(deflate)),
                             Err(e) => ThreadMessage::Error(e),
-                        }).ok();
+                        })
+                        .ok();
                     });
-                },
+                }
                 None => {
                     break;
                 }
@@ -748,15 +771,15 @@ impl<'a, W: Write> Encoder<'a, W> {
                     self.filter_chunks.advance();
                     let filter_mode = self.filter_mode();
                     self.dispatch_func(move |tx| {
-                        let mut filter = FilterChunk::new(previous.clone(),
-                                                          current.clone(),
-                                                          filter_mode);
+                        let mut filter =
+                            FilterChunk::new(previous.clone(), current.clone(), filter_mode);
                         tx.send(match filter.run() {
                             Ok(()) => ThreadMessage::FilterDone(Arc::new(filter)),
                             Err(e) => ThreadMessage::Error(e),
-                        }).ok();
+                        })
+                        .ok();
                     });
-                },
+                }
                 None => {
                     break;
                 }
@@ -766,13 +789,15 @@ impl<'a, W: Write> Encoder<'a, W> {
         // If we have output to run, write it!
         while let Some((_previous, current)) = self.deflate_chunks.pop_front() {
             if self.chunks_output >= self.chunks_total {
-                panic!("Got extra output after end of file; should not happen.");
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "Got extra output after end of file; should not happen.",
+                ));
             }
 
             // Combine the checksums!
-            self.adler32 = deflate::adler32_combine(self.adler32,
-                                                    current.adler32,
-                                                    current.input.data.len());
+            self.adler32 =
+                adler32::adler32_combine(self.adler32, current.adler32, current.input.data.len());
 
             // if not streaming, append to an in-memory buffer
             // and output a giant tag later.
@@ -818,22 +843,27 @@ impl<'a, W: Write> Encoder<'a, W> {
         let height = self.header.height as usize;
 
         let chunks = stride * height / self.options.chunk_size;
-        self.chunks_total = if chunks < 1 {
-            1
-        } else {
-            chunks
-        };
+        self.chunks_total = if chunks < 1 { 1 } else { chunks };
 
         self.pixel_chunks.advance();
-        self.pixel_accumulator = Arc::new(PixelChunk::new(self.header,
-                                                          0, // index
-                                                          self.start_row(0),
-                                                          self.end_row(0)));
+        self.pixel_accumulator = Arc::new(PixelChunk::new(
+            self.header,
+            0, // index
+            self.start_row(0),
+            self.end_row(0),
+        ));
 
         self.wrote_header = true;
 
         self.writer.write_signature()?;
         self.writer.write_header(self.header)
+    }
+
+    pub fn write_srgb(&mut self) -> IoResult {
+        if self.started_image {
+            return Err(invalid_data("Cannot write sRGB after image started."));
+        }
+        self.writer.write_srgb()
     }
 
     /// Write an indexed-color palette as a PLTE chunk.
@@ -859,7 +889,9 @@ impl<'a, W: Write> Encoder<'a, W> {
             return Err(invalid_input("Palette must have at least one entry."));
         }
         if palette.len() % 3 != 0 {
-            return Err(invalid_input("Palette must have an integral number of entries."));
+            return Err(invalid_input(
+                "Palette must have an integral number of entries.",
+            ));
         }
 
         self.wrote_palette = true;
@@ -886,14 +918,18 @@ impl<'a, W: Write> Encoder<'a, W> {
         match self.header.color_type {
             ColorType::Greyscale => {
                 if data.len() != 2 {
-                    return Err(invalid_input("Greyscale transparency data must be exactly 2 bytes."));
+                    return Err(invalid_input(
+                        "Greyscale transparency data must be exactly 2 bytes.",
+                    ));
                 }
-            },
+            }
             ColorType::Truecolor => {
                 if data.len() != 6 {
-                    return Err(invalid_input("Truecolor transparency data must be exactly 6 bytes."));
+                    return Err(invalid_input(
+                        "Truecolor transparency data must be exactly 6 bytes.",
+                    ));
                 }
-            },
+            }
             ColorType::IndexedColor => {
                 if !self.wrote_palette {
                     return Err(invalid_input("Cannot write transparency before palette."));
@@ -902,13 +938,16 @@ impl<'a, W: Write> Encoder<'a, W> {
                     return Err(invalid_input("Transparency data too short."));
                 }
                 if data.len() > self.palette_length {
-                    return Err(invalid_input("Transparency data cannot contain more entries than palette."));
+                    return Err(invalid_input(
+                        "Transparency data cannot contain more entries than palette.",
+                    ));
                 }
-            },
-            _ => {
-                return Err(invalid_input("Transparency chunk is invalid for color types with alpha"));
             }
-
+            _ => {
+                return Err(invalid_input(
+                    "Transparency chunk is invalid for color types with alpha",
+                ));
+            }
         }
         self.wrote_transparency = true;
         self.writer.write_chunk(b"tRNS", data)
@@ -927,8 +966,7 @@ impl<'a, W: Write> Encoder<'a, W> {
     // Copy a row's pixel data into buffers for async compression.
     // Returns immediately after copying.
     //
-    fn process_row(&mut self, row: &[u8]) -> io::Result<RowStatus>
-    {
+    fn process_row(&mut self, row: &[u8]) -> io::Result<RowStatus> {
         if self.pixel_index >= self.chunks_total {
             return Err(other("invalid internal state"));
         }
@@ -937,27 +975,34 @@ impl<'a, W: Write> Encoder<'a, W> {
         }
         if let ColorType::IndexedColor = self.header.color_type {
             if !self.wrote_palette {
-                return Err(invalid_input("Cannot write indexed-color image data before palette."));
+                return Err(invalid_input(
+                    "Cannot write indexed-color image data before palette.",
+                ));
             }
         }
         if !self.started_image {
             self.started_image = true;
         }
 
-        Arc::get_mut(&mut self.pixel_accumulator).unwrap().read_row(row);
+        Arc::get_mut(&mut self.pixel_accumulator)
+            .unwrap()
+            .read_row(row);
 
         if self.pixel_accumulator.is_full() {
             // Move the item off to the completed stack...
-            self.pixel_chunks.land(self.pixel_index, self.pixel_accumulator.clone());
+            self.pixel_chunks
+                .land(self.pixel_index, self.pixel_accumulator.clone())?;
 
             // Make a nice new buffer to accumulate data into.
             self.pixel_index += 1;
             if self.pixel_index < self.chunks_total {
                 self.pixel_chunks.advance();
-                self.pixel_accumulator = Arc::new(PixelChunk::new(self.header,
-                                                                  self.pixel_index,
-                                                                  self.start_row(self.pixel_index),
-                                                                  self.end_row(self.pixel_index)));
+                self.pixel_accumulator = Arc::new(PixelChunk::new(
+                    self.header,
+                    self.pixel_index,
+                    self.start_row(self.pixel_index),
+                    self.end_row(self.pixel_index),
+                ));
             }
 
             // Dispatch any available async tasks and output.
@@ -1022,21 +1067,22 @@ impl<'a, W: Write> Encoder<'a, W> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Header;
     use super::super::ColorType;
+    use super::super::Header;
     use super::Encoder;
-    use super::Options;
     use super::IoResult;
+    use super::Options;
 
     use std::io;
 
     fn test_encoder<F>(width: u32, height: u32, func: F)
-        where F: Fn(&mut Encoder<Vec<u8>>, &[u8]) -> IoResult
+    where
+        F: Fn(&mut Encoder<Vec<u8>>, &[u8]) -> IoResult,
     {
         match {
             || -> io::Result<Vec<u8>> {
                 let mut data = Vec::<u8>::with_capacity(width as usize * 3);
-                for i in 0 .. width as usize * 3 {
+                for i in 0..width as usize * 3 {
                     data.push((i % 255) as u8);
                 }
 
@@ -1053,20 +1099,19 @@ mod tests {
                 encoder.finish()
             }()
         } {
-            Ok(_writer) => {},
-            Err(e) => assert!(false, "Error {}", e),
+            Ok(_writer) => {}
+            Err(e) => panic!("Error {}", e),
         }
     }
 
     #[test]
     fn create_and_state() {
         test_encoder(1920, 1080, |encoder, data| {
-
-            assert_eq!(encoder.is_finished(), false);
-            assert_eq!(encoder.progress(), 0.0);
+            assert!(!encoder.is_finished());
+            assert!(encoder.progress() < f64::EPSILON);
 
             // We must finish out the file or it'll whinge.
-            for _y in 0 .. 1080 {
+            for _y in 0..1080 {
                 encoder.write_image_rows(data)?;
             }
 
@@ -1077,17 +1122,17 @@ mod tests {
     #[test]
     fn test_rows() {
         test_encoder(1920, 1080, |encoder, data| {
-            assert_eq!(encoder.is_finished(), false);
-            assert_eq!(encoder.progress(), 0.0);
+            assert!(!encoder.is_finished());
+            assert!(encoder.progress() < f64::EPSILON);
 
-            for _y in 0 .. 1080 {
+            for _y in 0..1080 {
                 encoder.write_image_rows(data)?;
             }
 
             // Should trigger all blocks!
             encoder.flush()?;
-            assert_eq!(encoder.is_finished(), true);
-            assert_eq!(encoder.progress(), 1.0);
+            assert!(encoder.is_finished());
+            assert!(encoder.progress() > f64::EPSILON);
 
             Ok(())
         });

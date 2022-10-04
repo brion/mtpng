@@ -25,21 +25,21 @@
 
 //! mtpng - a multithreaded parallel PNG encoder in Rust
 
-extern crate rayon;
-extern crate crc;
-extern crate libz_sys;
-#[macro_use] extern crate itertools;
-
-#[cfg(feature="capi")]
-extern crate libc;
-#[cfg(feature="capi")]
+#[cfg(feature = "capi")]
 pub mod capi;
 
+mod adler32;
+#[cfg(feature = "zlib")]
 mod deflate;
-mod filter;
+#[cfg(all(feature = "miniz", not(feature = "zlib")))]
+mod deflate_minz;
 pub mod encoder;
+mod filter;
 mod utils;
 mod writer;
+
+#[cfg(all(feature = "miniz", not(feature = "zlib")))]
+use deflate_minz as deflate;
 
 pub type Strategy = deflate::Strategy;
 pub type Filter = filter::Filter;
@@ -225,11 +225,7 @@ impl Header {
     ///
     /// If the bit depth is < 8, this will clamp at 1.
     pub fn bytes_per_pixel(&self) -> usize {
-        self.color_type.channels() * if self.depth > 8 {
-            2
-        } else {
-            1
-        }
+        self.color_type.channels() * if self.depth > 8 { 2 } else { 1 }
     }
 
     /// Calculate the stride in bytes for the encoded pixel rows.
@@ -240,8 +236,7 @@ impl Header {
 
         // Very long line lengths can overflow usize on 32-bit.
         // If we got this far, let it panic in the unwrap().
-        let stride_bits = bits_per_pixel.checked_mul(self.width as usize)
-                                        .unwrap();
+        let stride_bits = bits_per_pixel.checked_mul(self.width as usize).unwrap();
 
         // And round up to nearest byte.
         let stride_bytes = stride_bits >> 3;
@@ -292,7 +287,10 @@ impl Header {
     /// Set the compression method.
     ///
     /// This is not very useful, as only deflate is supported.
-    pub fn set_compression_method(&mut self, compression_method: CompressionMethod) -> io::Result<()> {
+    pub fn set_compression_method(
+        &mut self,
+        compression_method: CompressionMethod,
+    ) -> io::Result<()> {
         self.compression_method = compression_method;
         Ok(())
     }
@@ -310,7 +308,7 @@ impl Header {
     /// Currently only Standard is supported; requesting Adam7 will return an error.
     pub fn set_interlace_method(&mut self, interlace_method: InterlaceMethod) -> io::Result<()> {
         match interlace_method {
-            InterlaceMethod::Standard => {},
+            InterlaceMethod::Standard => {}
             InterlaceMethod::Adam7 => return Err(invalid_input("Adam7 interlacing not yet")),
         }
         self.interlace_method = interlace_method;
@@ -332,7 +330,7 @@ pub enum CompressionLevel {
     /// Good balance of speed and compression (zlib level 6).
     Default,
     /// Best compression but slow (zlib level 9).
-    High
+    High,
 }
 
 impl TryFrom<u8> for CompressionLevel {

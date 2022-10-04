@@ -10,6 +10,6 @@ do
     for xsample in $SAMPLES
     do
         sample=`basename "$xsample"`
-        cargo run --quiet --release  --features=cli -- --filter="$filter" "samples/$sample" "out/${sample%.png}-$filter.png"
+        cargo run --quiet --release --example mtpng -- --filter="$filter" "samples/$sample" "out/${sample%.png}-$filter.png"
     done
 done

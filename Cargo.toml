@@ -1,7 +1,7 @@
 [package]
 name = "mtpng"
 version = "0.4.0"
-authors = ["Brion Vibber <brion@pobox.com>"]
+authors = ["Brion Vibber <brion@pobox.com>", "Daniel Santana <danielgsantana@gmail.com>"]
 license = "MIT"
 description = "Multithreaded PNG encoder library"
 readme = "readme.md"
@@ -9,30 +9,33 @@ homepage = "https://github.com/brion/mtpng"
 repository = "https://github.com/brion/mtpng.git"
 keywords = ["png", "multithreaded", "threaded", "parallel"]
 categories = ["multimedia::images"]
+edition = "2021"
 
 [features]
-default=[]
-cli=["png", "clap", "time"]
+default=["miniz"]
 capi=["libc"]
-
-[[bin]]
-name="mtpng"
-path="src/bin/mtpng.rs"
-required-features=["cli"]
+zlib = ["libz-sys"]
+miniz = ["miniz_oxide", "simd-adler32"]
 
 [dependencies]
-rayon = "1.5.0"
-crc = "1.8.1"
-libz-sys = "1.0.23"
-itertools = "0.10.0"
+rayon = "1.5.1"
+crc = "3.0.0"
+libz-sys = { version = "1.1.3", optional = true}
+itertools = "0.10.1"
+miniz_oxide = { version = "0.5.1", optional = true }
+simd-adler32 = { version = "0.3.4", optional = true }
+typenum = "1.14.0"
 
 # for cli
-png = { version = "0.17.5", optional = true }
-clap = { version = "3.1.12", optional = true }
-time = { version = "0.3.9", optional = true }
-
 # for capi
-libc = { version = "0.2.43", optional = true }
+libc = { version = "0.2.106", optional = true }
+
+[dev-dependencies]
+clap = "3.1.18"
+png = "0.17.2"
+rand = "0.8.4"
+time = "0.3.4"
+walkdir = "2.3.2"
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]

@@ -6,5 +6,5 @@ mkdir -p out && \
 cd samples && \
 x="$1"
 shift
-cargo --quiet run --release  --features=cli -- "$@" "$x" "../out/$x" || exit 1
+cargo --quiet run --release --example mtpng -- "$@" "$x" "../out/$x" || exit 1
 echo ""

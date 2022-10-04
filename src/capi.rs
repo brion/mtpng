@@ -36,13 +36,13 @@ use std::ptr;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
-use libc::{c_void, c_int, size_t};
+use libc::{c_int, c_void, size_t};
 
 use super::ColorType;
-use super::Strategy;
 use super::CompressionLevel;
-use super::Mode::{Adaptive, Fixed};
 use super::Header;
+use super::Mode::{Adaptive, Fixed};
+use super::Strategy;
 
 use super::encoder::Encoder;
 use super::encoder::Options;
@@ -58,8 +58,8 @@ pub enum CResult {
     Err = 1,
 }
 
-impl From<Result<(),io::Error>> for CResult {
-    fn from(result: Result<(),io::Error>) -> CResult {
+impl From<Result<(), io::Error>> for CResult {
+    fn from(result: Result<(), io::Error>) -> CResult {
         match result {
             Ok(()) => CResult::Ok,
             Err(_) => CResult::Err,
@@ -72,11 +72,9 @@ pub type CReadFunc = unsafe extern "C"
     fn(*const c_void, *mut u8, size_t) -> size_t;
 */
 
-pub type CWriteFunc = unsafe extern "C"
-    fn(*const c_void, *const u8, size_t) -> size_t;
+pub type CWriteFunc = unsafe extern "C" fn(*const c_void, *const u8, size_t) -> size_t;
 
-pub type CFlushFunc = unsafe extern "C"
-    fn(*const c_void) -> bool;
+pub type CFlushFunc = unsafe extern "C" fn(*const c_void) -> bool;
 
 /*
 
@@ -126,11 +124,7 @@ pub struct CWriter {
 }
 
 impl CWriter {
-    fn new(write_func: CWriteFunc,
-           flush_func: CFlushFunc,
-           user_data: *mut c_void)
-    -> CWriter
-    {
+    fn new(write_func: CWriteFunc, flush_func: CFlushFunc, user_data: *mut c_void) -> CWriter {
         CWriter {
             write_func: write_func,
             flush_func: flush_func,
@@ -141,11 +135,7 @@ impl CWriter {
 
 impl Write for CWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let ret = unsafe {
-            (self.write_func)(self.user_data,
-                                   &buf[0],
-                                   buf.len())
-        };
+        let ret = unsafe { (self.write_func)(self.user_data, &buf[0], buf.len()) };
         if ret == buf.len() {
             Ok(ret)
         } else {
@@ -154,9 +144,7 @@ impl Write for CWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let ret = unsafe {
-            (self.flush_func)(self.user_data)
-        };
+        let ret = unsafe { (self.flush_func)(self.user_data) };
         if ret {
             Ok(())
         } else {
@@ -173,32 +161,29 @@ pub type PEncoderOptions = *mut Options<'static>;
 pub type PEncoder = *mut CEncoder;
 pub type PHeader = *mut Header;
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_threadpool_new(pp_pool: *mut PThreadPool, threads: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_threadpool_new(
+    pp_pool: *mut PThreadPool,
+    threads: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_pool.is_null() {
             return Err(invalid_input("pp_pool must not be null"));
         }
         if !(*pp_pool).is_null() {
-            return Err(invalid_input("*pp_pool must be null"))
+            return Err(invalid_input("*pp_pool must be null"));
         }
-        let pool = ThreadPoolBuilder::new().num_threads(threads)
-                                            .build()
-                                            .map_err(|err| other(&err.to_string()))?;
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .map_err(|err| other(&err.to_string()))?;
         *pp_pool = Box::into_raw(Box::new(pool));
         Ok(())
     }())
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_threadpool_release(pp_pool: *mut PThreadPool)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_threadpool_release(pp_pool: *mut PThreadPool) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_pool.is_null() {
             return Err(invalid_input("pp_pool must not be null"));
@@ -212,18 +197,14 @@ fn mtpng_threadpool_release(pp_pool: *mut PThreadPool)
     }())
 }
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_new(pp_options: *mut PEncoderOptions)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_new(pp_options: *mut PEncoderOptions) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_options.is_null() {
             return Err(invalid_input("pp_options must not be null"));
         }
         if !(*pp_options).is_null() {
-            return Err(invalid_input("*pp_options must be null"))
+            return Err(invalid_input("*pp_options must be null"));
         }
         *pp_options = Box::into_raw(Box::new(Options::new()));
         Ok(())
@@ -231,10 +212,9 @@ fn mtpng_encoder_options_new(pp_options: *mut PEncoderOptions)
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_release(pp_options: *mut PEncoderOptions)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_release(
+    pp_options: *mut PEncoderOptions,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_options.is_null() {
             return Err(invalid_input("pp_header must not be null"));
@@ -248,13 +228,11 @@ fn mtpng_encoder_options_release(pp_options: *mut PEncoderOptions)
     }())
 }
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_set_thread_pool(p_options: PEncoderOptions,
-                                         p_pool: PThreadPool)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_set_thread_pool(
+    p_options: PEncoderOptions,
+    p_pool: PThreadPool,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_options.is_null() {
             return Err(invalid_input("p_options must not be null"));
@@ -263,13 +241,11 @@ fn mtpng_encoder_options_set_thread_pool(p_options: PEncoderOptions,
     }())
 }
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_set_filter(p_options: PEncoderOptions,
-                                    filter_mode: c_int)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_set_filter(
+    p_options: PEncoderOptions,
+    filter_mode: c_int,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_options.is_null() {
             return Err(invalid_input("p_options must not be null"));
@@ -287,11 +263,10 @@ fn mtpng_encoder_options_set_filter(p_options: PEncoderOptions,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_set_strategy(p_options: PEncoderOptions,
-                                      strategy_mode: c_int)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_set_strategy(
+    p_options: PEncoderOptions,
+    strategy_mode: c_int,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_options.is_null() {
             return Err(invalid_input("p_options must not be null"));
@@ -309,11 +284,10 @@ fn mtpng_encoder_options_set_strategy(p_options: PEncoderOptions,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_set_compression_level(p_options: PEncoderOptions,
-                                               compression_level: c_int)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_set_compression_level(
+    p_options: PEncoderOptions,
+    compression_level: c_int,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_options.is_null() {
             return Err(invalid_input("p_options must not be null"));
@@ -327,11 +301,10 @@ fn mtpng_encoder_options_set_compression_level(p_options: PEncoderOptions,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_options_set_chunk_size(p_options: PEncoderOptions,
-                                        chunk_size: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_options_set_chunk_size(
+    p_options: PEncoderOptions,
+    chunk_size: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_options.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -340,18 +313,14 @@ fn mtpng_encoder_options_set_chunk_size(p_options: PEncoderOptions,
     }())
 }
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_header_new(pp_header: *mut PHeader)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_header_new(pp_header: *mut PHeader) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_header.is_null() {
             return Err(invalid_input("pp_header must not be null"));
         }
         if !(*pp_header).is_null() {
-            return Err(invalid_input("*pp_header must be null"))
+            return Err(invalid_input("*pp_header must be null"));
         }
         *pp_header = Box::into_raw(Box::new(Header::new()));
         Ok(())
@@ -359,10 +328,7 @@ fn mtpng_header_new(pp_header: *mut PHeader)
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_header_release(pp_header: *mut PHeader)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_header_release(pp_header: *mut PHeader) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_header.is_null() {
             return Err(invalid_input("pp_header must not be null"));
@@ -377,12 +343,11 @@ fn mtpng_header_release(pp_header: *mut PHeader)
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_header_set_size(p_header: PHeader,
-                         width: u32,
-                         height: u32)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_header_set_size(
+    p_header: PHeader,
+    width: u32,
+    height: u32,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_header.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -392,12 +357,11 @@ fn mtpng_header_set_size(p_header: PHeader,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_header_set_color(p_header: PHeader,
-                                   color_type: c_int,
-                                   depth: u8)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_header_set_color(
+    p_header: PHeader,
+    color_type: c_int,
+    depth: u8,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_header.is_null() {
             return Err(invalid_input("p_header must not be null"));
@@ -410,17 +374,14 @@ fn mtpng_header_set_color(p_header: PHeader,
     }())
 }
 
-
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_new(pp_encoder: *mut PEncoder,
-                     write_func: Option<CWriteFunc>,
-                     flush_func: Option<CFlushFunc>,
-                     user_data: *mut c_void,
-                     p_options: PEncoderOptions)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_new(
+    pp_encoder: *mut PEncoder,
+    write_func: Option<CWriteFunc>,
+    flush_func: Option<CFlushFunc>,
+    user_data: *mut c_void,
+    p_options: PEncoderOptions,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_encoder.is_null() {
             return Err(invalid_input("pp_encoder must not be null"));
@@ -430,7 +391,7 @@ fn mtpng_encoder_new(pp_encoder: *mut PEncoder,
         }
         let writer = match (write_func, flush_func) {
             (Some(wf), Some(ff)) => CWriter::new(wf, ff, user_data),
-            _ => return Err(invalid_input("write_func and flush_func must not be null"))
+            _ => return Err(invalid_input("write_func and flush_func must not be null")),
         };
         let default = Options::<'static>::new();
         let options = if p_options.is_null() {
@@ -445,16 +406,13 @@ fn mtpng_encoder_new(pp_encoder: *mut PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_release(pp_encoder: *mut PEncoder)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_release(pp_encoder: *mut PEncoder) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_encoder.is_null() {
-            return Err(invalid_input("pp_encoder must not be null"))
+            return Err(invalid_input("pp_encoder must not be null"));
         }
         if (*pp_encoder).is_null() {
-            return Err(invalid_input("*pp_encoder must not be null"))
+            return Err(invalid_input("*pp_encoder must not be null"));
         }
         drop(Box::from_raw(*pp_encoder));
         *pp_encoder = ptr::null_mut();
@@ -462,13 +420,11 @@ fn mtpng_encoder_release(pp_encoder: *mut PEncoder)
     }())
 }
 
-
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_write_header(p_encoder: PEncoder,
-                              p_header: PHeader)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_write_header(
+    p_encoder: PEncoder,
+    p_header: PHeader,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_encoder.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -482,12 +438,11 @@ fn mtpng_encoder_write_header(p_encoder: PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_write_palette(p_encoder: PEncoder,
-                               p_bytes: *const u8,
-                               len: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_write_palette(
+    p_encoder: PEncoder,
+    p_bytes: *const u8,
+    len: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_encoder.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -501,12 +456,11 @@ fn mtpng_encoder_write_palette(p_encoder: PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_write_transparency(p_encoder: PEncoder,
-                                    p_bytes: *const u8,
-                                    len: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_write_transparency(
+    p_encoder: PEncoder,
+    p_bytes: *const u8,
+    len: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_encoder.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -520,13 +474,12 @@ fn mtpng_encoder_write_transparency(p_encoder: PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_write_chunk(p_encoder: PEncoder,
-                             p_tag: *const c_char,
-                             p_bytes: *const u8,
-                             len: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_write_chunk(
+    p_encoder: PEncoder,
+    p_tag: *const c_char,
+    p_bytes: *const u8,
+    len: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_encoder.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -544,12 +497,11 @@ fn mtpng_encoder_write_chunk(p_encoder: PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_write_image_rows(p_encoder: PEncoder,
-                                  p_bytes: *const u8,
-                                  len: size_t)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_write_image_rows(
+    p_encoder: PEncoder,
+    p_bytes: *const u8,
+    len: size_t,
+) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if p_encoder.is_null() {
             return Err(invalid_input("p_encoder must not be null"));
@@ -563,10 +515,7 @@ fn mtpng_encoder_write_image_rows(p_encoder: PEncoder,
 }
 
 #[no_mangle]
-pub unsafe extern "C"
-fn mtpng_encoder_finish(pp_encoder: *mut PEncoder)
--> CResult
-{
+pub unsafe extern "C" fn mtpng_encoder_finish(pp_encoder: *mut PEncoder) -> CResult {
     CResult::from(|| -> io::Result<()> {
         if pp_encoder.is_null() {
             return Err(invalid_input("pp_encoder must not be null"));
